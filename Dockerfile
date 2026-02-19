@@ -12,10 +12,15 @@ RUN apt-get update && \
       > /etc/apt/sources.list.d/cloudflare-client.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends cloudflare-warp dbus && \
-    apt-get purge -y curl && \
-    apt-get autoremove -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     which warp-svc && which warp-cli
+# Install mihomo
+ARG MIHOMO_VERSION=v1.19.0
+RUN curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-${MIHOMO_VERSION}.gz" \
+      -o /tmp/mihomo.gz && \
+    gunzip /tmp/mihomo.gz && \
+    mv /tmp/mihomo /usr/local/bin/mihomo && \
+    chmod +x /usr/local/bin/mihomo
 COPY --from=builder /faceproxy /faceproxy
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

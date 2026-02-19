@@ -30,6 +30,7 @@ var (
 	listenAddr  string
 
 	enableWarp    bool
+	enableMihomo  bool
 	socksAddr     = "127.0.0.1:40000"
 	httpTransport *http.Transport
 )
@@ -109,7 +110,7 @@ func dialTLSBackend(host string) (net.Conn, error) {
 	addr := host + ":443"
 	var rawConn net.Conn
 	var err error
-	if enableWarp {
+	if enableWarp || enableMihomo {
 		rawConn, err = socks5Dial(socksAddr, addr)
 	} else {
 		rawConn, err = net.Dial("tcp", addr)
@@ -392,6 +393,7 @@ func main() {
 	hfSpaceName = os.Getenv("HF_SPACE_NAME")
 	hfSpaceUser = os.Getenv("HF_SPACE_USER")
 	enableWarp = os.Getenv("ENABLE_AUTOWARP") == "true"
+	enableMihomo = os.Getenv("ENABLE_MIHOMO") == "true"
 	listenAddr = os.Getenv("LISTEN_ADDR")
 	if listenAddr == "" {
 		if port := os.Getenv("PORT"); port != "" {
@@ -406,12 +408,22 @@ func main() {
 		listenAddr = ":8080"
 	}
 
+	// 互斥：mihomo 优先于 WARP
+	if enableMihomo {
+		enableWarp = false
+		socksAddr = "127.0.0.1:7890"
+	}
+
 	// 初始化 HTTP Transport
 	httpTransport = &http.Transport{}
-	if enableWarp {
+	if enableWarp || enableMihomo {
 		proxyURL, _ := url.Parse("socks5://" + socksAddr)
 		httpTransport.Proxy = http.ProxyURL(proxyURL)
-		log.Printf("WARP SOCKS5 proxy enabled via %s", socksAddr)
+		if enableMihomo {
+			log.Printf("mihomo proxy enabled via %s", socksAddr)
+		} else {
+			log.Printf("WARP SOCKS5 proxy enabled via %s", socksAddr)
+		}
 	}
 
 	targetHost = fmt.Sprintf("%s-%s.hf.space", hfSpaceUser, hfSpaceName)
