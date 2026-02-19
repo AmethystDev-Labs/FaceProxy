@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,10 +28,101 @@ var (
 	hfSpaceUser string
 	targetHost  string
 	listenAddr  string
+
+	enableWarp    bool
+	socksAddr     = "127.0.0.1:40000"
+	httpTransport *http.Transport
 )
 
 type jwtResponse struct {
 	Token string `json:"token"`
+}
+
+// socks5Dial 通过 SOCKS5 代理建立 TCP 连接（无外部依赖）
+func socks5Dial(proxyAddr, targetAddr string) (net.Conn, error) {
+	conn, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	host, portStr, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	// 握手：VER=5, NMETHODS=1, METHOD=0(无认证)
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if buf[0] != 0x05 || buf[1] != 0x00 {
+		conn.Close()
+		return nil, fmt.Errorf("socks5: unsupported auth method %d", buf[1])
+	}
+
+	// CONNECT 请求
+	req := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
+	req = append(req, []byte(host)...)
+	req = append(req, byte(port>>8), byte(port))
+	if _, err := conn.Write(req); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	// 读取响应
+	resp := make([]byte, 4)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if resp[1] != 0x00 {
+		conn.Close()
+		return nil, fmt.Errorf("socks5: connect failed with code %d", resp[1])
+	}
+	// 消费剩余的绑定地址
+	switch resp[3] {
+	case 0x01:
+		io.ReadFull(conn, make([]byte, 4+2))
+	case 0x03:
+		lenBuf := make([]byte, 1)
+		io.ReadFull(conn, lenBuf)
+		io.ReadFull(conn, make([]byte, int(lenBuf[0])+2))
+	case 0x04:
+		io.ReadFull(conn, make([]byte, 16+2))
+	}
+	return conn, nil
+}
+
+// dialTLSBackend 建立到后端的 TLS 连接，可选走 SOCKS5
+func dialTLSBackend(host string) (net.Conn, error) {
+	addr := host + ":443"
+	var rawConn net.Conn
+	var err error
+	if enableWarp {
+		rawConn, err = socks5Dial(socksAddr, addr)
+	} else {
+		rawConn, err = net.Dial("tcp", addr)
+	}
+	if err != nil {
+		return nil, err
+	}
+	tlsConn := tls.Client(rawConn, &tls.Config{ServerName: host})
+	if err := tlsConn.Handshake(); err != nil {
+		rawConn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
 }
 
 func getJwtToken() (string, error) {
@@ -49,7 +141,7 @@ func getJwtToken() (string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+hfToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Transport: httpTransport}).Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -113,8 +205,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clientConn.Close()
 
-	// TLS 连接到后端
-	backendConn, err := tls.Dial("tcp", targetHost+":443", &tls.Config{ServerName: targetHost})
+	// TLS 连接到后端（可选走 WARP）
+	backendConn, err := dialTLSBackend(targetHost)
 	if err != nil {
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
@@ -264,6 +356,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 禁止自动重定向
 	client := &http.Client{
+		Transport: httpTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -298,6 +391,7 @@ func main() {
 	hfToken = os.Getenv("HF_TOKEN")
 	hfSpaceName = os.Getenv("HF_SPACE_NAME")
 	hfSpaceUser = os.Getenv("HF_SPACE_USER")
+	enableWarp = os.Getenv("ENABLE_AUTOWARP") == "true"
 	listenAddr = os.Getenv("LISTEN_ADDR")
 	if listenAddr == "" {
 		if port := os.Getenv("PORT"); port != "" {
@@ -310,6 +404,14 @@ func main() {
 	}
 	if listenAddr == "" {
 		listenAddr = ":8080"
+	}
+
+	// 初始化 HTTP Transport
+	httpTransport = &http.Transport{}
+	if enableWarp {
+		proxyURL, _ := url.Parse("socks5://" + socksAddr)
+		httpTransport.Proxy = http.ProxyURL(proxyURL)
+		log.Printf("WARP SOCKS5 proxy enabled via %s", socksAddr)
 	}
 
 	targetHost = fmt.Sprintf("%s-%s.hf.space", hfSpaceUser, hfSpaceName)
