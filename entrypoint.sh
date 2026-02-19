@@ -1,9 +1,12 @@
 #!/bin/bash
 set -e
 
+WARP_READY=false
+
 if [ "$ENABLE_AUTOWARP" = "true" ]; then
     if ! command -v warp-svc >/dev/null 2>&1; then
         echo "[FaceProxy] ERROR: ENABLE_AUTOWARP=true but warp-svc not found, running without WARP"
+        export ENABLE_AUTOWARP=false
     else
         # warp-svc 依赖 dbus
         mkdir -p /run/dbus
@@ -15,6 +18,15 @@ if [ "$ENABLE_AUTOWARP" = "true" ]; then
         echo "[FaceProxy] Starting Cloudflare WARP daemon..."
         warp-svc &
         sleep 3
+
+        # 等待 warp-cli 可用
+        for i in $(seq 1 10); do
+            if warp-cli --accept-tos status >/dev/null 2>&1; then
+                break
+            fi
+            echo "[FaceProxy] Waiting for warp-svc to be ready... ($i/10)"
+            sleep 2
+        done
 
         # 注册（已注册则跳过）
         if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
@@ -31,13 +43,16 @@ if [ "$ENABLE_AUTOWARP" = "true" ]; then
         for i in $(seq 1 30); do
             if warp-cli --accept-tos status 2>/dev/null | grep -q "Connected"; then
                 echo "[FaceProxy] WARP connected"
+                WARP_READY=true
                 break
-            fi
-            if [ "$i" -eq 30 ]; then
-                echo "[FaceProxy] WARNING: WARP connection timeout, continuing without WARP"
             fi
             sleep 1
         done
+
+        if [ "$WARP_READY" = "false" ]; then
+            echo "[FaceProxy] WARNING: WARP failed to connect, disabling WARP"
+            export ENABLE_AUTOWARP=false
+        fi
     fi
 fi
 

@@ -141,7 +141,7 @@ func getJwtToken() (string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+hfToken)
 
-	resp, err := (&http.Client{Transport: httpTransport}).Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
 	}
