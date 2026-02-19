@@ -11,7 +11,7 @@ RUN apt-get update && \
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ bookworm main" \
       > /etc/apt/sources.list.d/cloudflare-client.list && \
     apt-get update && \
-    apt-get install -y --no-install-recommends cloudflare-warp && \
+    apt-get install -y --no-install-recommends cloudflare-warp dbus && \
     warp-svc --version && \
     apt-get purge -y curl gnupg && \
     apt-get autoremove -y && \

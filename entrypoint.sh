@@ -5,6 +5,13 @@ if [ "$ENABLE_AUTOWARP" = "true" ]; then
     if ! command -v warp-svc >/dev/null 2>&1; then
         echo "[FaceProxy] ERROR: ENABLE_AUTOWARP=true but warp-svc not found, running without WARP"
     else
+        # warp-svc 依赖 dbus
+        mkdir -p /run/dbus
+        if command -v dbus-daemon >/dev/null 2>&1; then
+            dbus-daemon --system --nofork &
+            sleep 1
+        fi
+
         echo "[FaceProxy] Starting Cloudflare WARP daemon..."
         warp-svc &
         sleep 3
