@@ -12,8 +12,7 @@ RUN apt-get update && \
       > /etc/apt/sources.list.d/cloudflare-client.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends cloudflare-warp dbus && \
-    apt-get purge -y curl gnupg && \
-    apt-mark manual cloudflare-warp dbus && \
+    apt-get purge -y curl && \
     apt-get autoremove -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     which warp-svc && which warp-cli
