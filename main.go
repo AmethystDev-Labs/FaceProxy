@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -80,13 +83,133 @@ func getJwtToken() (string, error) {
 	return jwtToken, nil
 }
 
-// hopHeaders 不应被代理转发
+// hopHeaders 不应被代理转发（普通 HTTP 请求）
 var hopHeaders = []string{
 	"Connection", "Keep-Alive", "Proxy-Authenticate",
 	"Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
 }
 
+func isWebSocket(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	token, err := getJwtToken()
+	if err != nil {
+		http.Error(w, "Proxy Error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// 劫持客户端连接
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "WebSocket hijack not supported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, clientBuf, err := hj.Hijack()
+	if err != nil {
+		http.Error(w, "Hijack failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer clientConn.Close()
+
+	// TLS 连接到后端
+	backendConn, err := tls.Dial("tcp", targetHost+":443", &tls.Config{ServerName: targetHost})
+	if err != nil {
+		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		return
+	}
+	defer backendConn.Close()
+
+	// 构建升级请求
+	reqURL := r.URL.Path
+	if r.URL.RawQuery != "" {
+		reqURL += "?" + r.URL.RawQuery
+	}
+	var buf strings.Builder
+	buf.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", r.Method, reqURL))
+	buf.WriteString(fmt.Sprintf("Host: %s\r\n", targetHost))
+
+	// 复制原始请求头（保留 WebSocket 相关头）
+	for k, vv := range r.Header {
+		kl := strings.ToLower(k)
+		if kl == "host" {
+			continue
+		}
+		for _, v := range vv {
+			buf.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+		}
+	}
+
+	// 注入 JWT Cookie
+	existing := r.Header.Get("Cookie")
+	spaceCookie := "spaces-jwt=" + token
+	if existing != "" {
+		buf.WriteString(fmt.Sprintf("Cookie: %s; %s\r\n", existing, spaceCookie))
+	} else {
+		buf.WriteString(fmt.Sprintf("Cookie: %s\r\n", spaceCookie))
+	}
+
+	// 转发客户端真实 IP
+	clientIP := r.Header.Get("X-Forwarded-For")
+	if clientIP == "" {
+		clientIP, _, _ = net.SplitHostPort(r.RemoteAddr)
+	}
+	if clientIP != "" {
+		buf.WriteString(fmt.Sprintf("X-Forwarded-For: %s\r\n", clientIP))
+		buf.WriteString(fmt.Sprintf("X-Real-IP: %s\r\n", clientIP))
+	}
+
+	buf.WriteString("\r\n")
+
+	// 发送升级请求到后端
+	if _, err := backendConn.Write([]byte(buf.String())); err != nil {
+		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		return
+	}
+
+	// 读取后端响应并转发给客户端
+	backendBuf := bufio.NewReader(backendConn)
+	resp, err := http.ReadResponse(backendBuf, r)
+	if err != nil {
+		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		return
+	}
+
+	// 将后端响应原样写回客户端
+	var respBuf strings.Builder
+	respBuf.WriteString(fmt.Sprintf("HTTP/1.1 %s\r\n", resp.Status))
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			respBuf.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
+		}
+	}
+	respBuf.WriteString("\r\n")
+	clientConn.Write([]byte(respBuf.String()))
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return
+	}
+
+	// 双向转发数据
+	done := make(chan struct{}, 2)
+	go func() {
+		io.Copy(backendConn, clientBuf)
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(clientConn, backendBuf)
+		done <- struct{}{}
+	}()
+	<-done
+}
+
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
+	if isWebSocket(r) {
+		handleWebSocket(w, r)
+		return
+	}
+
 	token, err := getJwtToken()
 	if err != nil {
 		http.Error(w, "Proxy Error: "+err.Error(), http.StatusBadGateway)
