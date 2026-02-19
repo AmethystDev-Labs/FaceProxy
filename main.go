@@ -176,6 +176,11 @@ func main() {
 	hfSpaceName = os.Getenv("HF_SPACE_NAME")
 	hfSpaceUser = os.Getenv("HF_SPACE_USER")
 	listenAddr = os.Getenv("LISTEN_ADDR")
+	if listenAddr == "" {
+		if port := os.Getenv("PORT"); port != "" {
+			listenAddr = ":" + port
+		}
+	}
 
 	if hfToken == "" || hfSpaceName == "" || hfSpaceUser == "" {
 		log.Fatal("HF_TOKEN, HF_SPACE_NAME, HF_SPACE_USER are required")
